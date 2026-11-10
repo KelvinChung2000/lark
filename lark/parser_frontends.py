@@ -7,7 +7,7 @@ from .lexer import LexerThread, LineCounter, Token, _TextSlice_WithLineCount, Ba
 from .parsers import earley, xearley, cyk
 from .parsers.lalr_parser import LALR_Parser
 from .tree import Tree
-from .common import LexerConf, ParserConf, _ParserArgType, _LexerArgType
+from .common import LexerConf, ParserConf, _ParserArgType, _LexerArgType, LALR_PARSERS
 
 if TYPE_CHECKING:
     from .parsers.lalr_analysis import ParseTableBase
@@ -62,8 +62,12 @@ def _wrap_lexer(lexer_class):
 
 def _deserialize_parsing_frontend(data, memo, lexer_conf, callbacks, options):
     parser_conf = ParserConf.deserialize(data['parser_conf'], memo)
-    cls = (options and options._plugins.get('LALR_Parser')) or LALR_Parser
-    parser = cls.deserialize(data['parser'], memo, callbacks, options.debug)
+    if parser_conf.parser_type == 'lalr-rs':
+        from .parsers.lalr_parser_rs import LALR_Parser as LALR_Parser_RS
+        parser = LALR_Parser_RS.deserialize(data['parser'], memo, callbacks, transformer=options.transformer)
+    else:
+        cls = (options and options._plugins.get('LALR_Parser')) or LALR_Parser
+        parser = cls.deserialize(data['parser'], memo, callbacks, options.debug)
     parser_conf.callbacks = callbacks
     return ParsingFrontend(lexer_conf, parser_conf, options, parser=parser)
 
@@ -237,10 +241,11 @@ class ParsingFrontend(Serialize):
 
 
 def _validate_frontend_args(parser, lexer) -> None:
-    assert_config(parser, ('lalr', 'earley', 'cyk'))
+    assert_config(parser, ('lalr', 'lalr-rs', 'earley', 'cyk'))
     if not isinstance(lexer, type):     # not custom lexer?
         expected = {
             'lalr': ('basic', 'contextual'),
+            'lalr-rs': ('basic', 'contextual'),
             'earley': ('basic', 'dynamic', 'dynamic_complete'),
             'cyk': ('basic', ),
          }[parser]
@@ -286,6 +291,16 @@ def create_lalr_parser(lexer_conf: LexerConf, parser_conf: ParserConf, options=N
 _parser_creators['lalr'] = create_lalr_parser
 
 ###}
+
+def create_lalr_rs_parser(lexer_conf: LexerConf, parser_conf: ParserConf, options=None):
+    from .parsers.lalr_parser_rs import LALR_Parser as LALR_Parser_RS, check_lexer_conf
+    check_lexer_conf(lexer_conf)
+    debug = options.debug if options else False
+    strict = options.strict if options else False
+    transformer = options.transformer if options else None
+    return LALR_Parser_RS(parser_conf, transformer=transformer, debug=debug, strict=strict)
+
+_parser_creators['lalr-rs'] = create_lalr_rs_parser
 
 class EarleyRegexpMatcher:
     def __init__(self, lexer_conf):

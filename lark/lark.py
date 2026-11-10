@@ -20,7 +20,7 @@ from .utils import Serialize, SerializeMemoizer, FS, logger, TextOrSlice, LarkIn
 from .load_grammar import load_grammar, FromPackageLoader, Grammar, verify_used_files, PackageResource, sha256_digest
 
 from .tree import Tree
-from .common import LexerConf, ParserConf, _ParserArgType, _LexerArgType
+from .common import LexerConf, ParserConf, _ParserArgType, _LexerArgType, LALR_PARSERS
 
 from .lexer import Lexer, BasicLexer, TerminalDef, LexerThread, Token
 from .visitors import _Return_T
@@ -119,13 +119,16 @@ class LarkOptions(Serialize):
 
     parser
             Decides which parser engine to use. Accepts "earley" or "lalr". (Default: "earley").
+            "lalr-rs" runs the "lalr" lexer and parser in the ``lark_lalr_rs`` Rust extension,
+            without the interactive parser, postlex or custom lexers. Its lexer matches terminals
+            with PCRE2 instead of ``re``, which differs on some Unicode classes.
             (there is also a "cyk" option for legacy)
     lexer
             Decides whether or not to use a lexer stage
 
             - "auto" (default): Choose for me based on the parser
             - "basic": Use a basic lexer
-            - "contextual": Stronger lexer (only works with parser="lalr")
+            - "contextual": Stronger lexer (only works with parser="lalr" or "lalr-rs")
             - "dynamic": Flexible and powerful (only with parser="earley")
             - "dynamic_complete": Same as dynamic, but tries *every* variation of tokenizing possible.
     ambiguity
@@ -214,7 +217,7 @@ class LarkOptions(Serialize):
         self.__dict__['options'] = options
 
 
-        assert_config(self.parser, ('earley', 'lalr', 'cyk', None))
+        assert_config(self.parser, ('earley', 'lalr', 'lalr-rs', 'cyk', None))
 
         if self.parser == 'earley' and self.transformer:
             raise ConfigurationError('Cannot specify an embedded transformer when using the Earley algorithm. '
@@ -339,7 +342,7 @@ class Lark(Serialize, Generic[_Return_T]):
                     raise ConfigurationError("Grammar must be ascii only, when use_bytes=True")
 
             if self.options.cache:
-                if self.options.parser != 'lalr':
+                if self.options.parser not in LALR_PARSERS:
                     raise ConfigurationError("cache only works with parser='lalr' for now")
 
                 unhashable = ('transformer', 'postlex', 'lexer_callbacks', 'edit_terminals', '_plugins')
@@ -398,7 +401,7 @@ class Lark(Serialize, Generic[_Return_T]):
 
 
         if self.options.lexer == 'auto':
-            if self.options.parser == 'lalr':
+            if self.options.parser in LALR_PARSERS:
                 self.options.lexer = 'contextual'
             elif self.options.parser == 'earley':
                 if self.options.postlex is not None:
@@ -507,7 +510,7 @@ class Lark(Serialize, Generic[_Return_T]):
                     self.rules,
                     self.options.tree_class or Tree,
                     self.options.propagate_positions,
-                    self.options.parser != 'lalr' and self.options.ambiguity == 'explicit',
+                    self.options.parser not in LALR_PARSERS and self.options.ambiguity == 'explicit',
                     self.options.maybe_placeholders
                 )
             self._callbacks = self._parse_tree_builder.create_callback(self.options.transformer)
@@ -530,7 +533,7 @@ class Lark(Serialize, Generic[_Return_T]):
 
         Useful for caching and multiprocessing.
         """
-        if self.options.parser != 'lalr':
+        if self.options.parser not in LALR_PARSERS:
             raise NotImplementedError("Lark.save() is only implemented for the LALR(1) parser.")
         data, m = self.memo_serialize([TerminalDef, Rule])
         if exclude_options:
@@ -733,7 +736,7 @@ class Lark(Serialize, Generic[_Return_T]):
                 For convenience, these sub-exceptions also inherit from ``ParserError`` and ``LexerError``.
 
         """
-        if on_error is not None and self.options.parser != 'lalr':
+        if on_error is not None and self.options.parser not in LALR_PARSERS:
             raise NotImplementedError("The on_error option is only implemented for the LALR(1) parser.")
         return self.parser.parse(text, start=start, on_error=on_error)
 

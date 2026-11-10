@@ -78,6 +78,7 @@ version = {attr = "lark.__version__"}
 files = ["lark", "tests/test_typing.py"]
 python_version = "3.8"
 show_error_codes = true
+mypy_path = "lark-lalr-rs"
 enable_error_code = ["ignore-without-code", "unused-ignore"]
 exclude = [
   "^lark/__pyinstaller",

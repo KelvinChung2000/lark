@@ -4,6 +4,7 @@ from __future__ import absolute_import
 import re
 import unittest
 import os
+import platform
 import sys
 from copy import copy, deepcopy
 
@@ -24,8 +25,9 @@ except ImportError:
 
 import lark
 from lark import logger
-from lark.lark import Lark
+from lark.lark import Lark, PostLex
 from lark.utils import TextSlice
+from lark.common import LALR_PARSERS
 from lark.exceptions import GrammarError, ParseError, UnexpectedToken, UnexpectedInput, UnexpectedCharacters, ConfigurationError
 from lark.tree import Tree
 from lark.visitors import Transformer, Transformer_InPlace, v_args, Transformer_InPlaceRecursive
@@ -1316,6 +1318,7 @@ def _make_parser_test(LEXER, PARSER):
             g.parse('\x01\x02\x03')
 
 
+        @unittest.skipIf(PARSER == 'lalr-rs', "lalr-rs does not support use_bytes")
         def test_bytes_utf8(self):
             g = r"""
             start: BOM? char+
@@ -2124,7 +2127,7 @@ def _make_parser_test(LEXER, PARSER):
             """
             self.assertRaises(IOError, _Lark, grammar)
 
-        @unittest.skipIf('dynamic' in LEXER, "%declare/postlex doesn't work with dynamic")
+        @unittest.skipIf('dynamic' in LEXER or PARSER == 'lalr-rs', "%declare/postlex doesn't work with dynamic or lalr-rs")
         def test_postlex_declare(self): # Note: this test does a lot. maybe split it up?
             class TestPostLexer:
                 def process(self, stream):
@@ -2147,7 +2150,7 @@ def _make_parser_test(LEXER, PARSER):
             tree = parser.parse(test_file)
             self.assertEqual(tree.children, [Token('B', 'A')])
 
-        @unittest.skipIf('dynamic' in LEXER, "%declare/postlex doesn't work with dynamic")
+        @unittest.skipIf('dynamic' in LEXER or PARSER == 'lalr-rs', "%declare/postlex doesn't work with dynamic or lalr-rs")
         def test_postlex_indenter(self):
             class CustomIndenter(Indenter):
                 NL_type = 'NEWLINE'
@@ -2515,7 +2518,7 @@ def _make_parser_test(LEXER, PARSER):
             parser = _Lark(grammar)
 
 
-        @unittest.skipIf(PARSER!='lalr' or LEXER == 'custom_old0', "Serialize currently only works for LALR parsers without custom lexers (though it should be easy to extend)")
+        @unittest.skipIf(PARSER not in LALR_PARSERS or LEXER == 'custom_old0', "Serialize currently only works for LALR parsers without custom lexers (though it should be easy to extend)")
         def test_serialize(self):
             grammar = """
                 start: _ANY b "C"
@@ -2529,7 +2532,7 @@ def _make_parser_test(LEXER, PARSER):
             parser2 = Lark.load(s)
             self.assertEqual(parser2.parse('ABC'), Tree('start', [Tree('b', [])]) )
 
-        @unittest.skipIf(PARSER!='lalr' or LEXER == 'custom_old0', "Serialize currently only works for LALR parsers without custom lexers (though it should be easy to extend)")
+        @unittest.skipIf(PARSER not in LALR_PARSERS or LEXER == 'custom_old0', "Serialize currently only works for LALR parsers without custom lexers (though it should be easy to extend)")
         def test_serialize_with_transformer(self):
             grammar = r"""
                 start: NUMBER
@@ -2575,7 +2578,7 @@ def _make_parser_test(LEXER, PARSER):
                 self.assertEqual(a.line, 1)
                 self.assertEqual(b.line, 2)
 
-        @unittest.skipIf(PARSER=='cyk' or LEXER=='custom_old0', "match_examples() not supported for CYK/old custom lexer")
+        @unittest.skipIf(PARSER in ('cyk', 'lalr-rs') or LEXER=='custom_old0', "match_examples() not supported for CYK/lalr-rs/old custom lexer")
         def test_match_examples(self):
             p = _Lark(r"""
                 start: "a" "b" "c"
@@ -2726,7 +2729,184 @@ def _make_parser_test(LEXER, PARSER):
             s = "[0 1, 2,@, 3,,, 4, 5 6 ]$"
             tree = g.parse(s, on_error=ignore_errors)
 
-        @unittest.skipIf(PARSER == 'lalr', "test on_error only works with lalr")
+        @unittest.skipIf(PARSER != 'lalr-rs', "lalr-rs rejects the features that need the interactive parser or Python lexing")
+        def test_lalr_rs_unsupported(self):
+            g = r"""start: "a" """
+            class NoopPostLex(PostLex):
+                def process(self, stream):
+                    return stream
+            cases = [
+                ("postlex", lambda: _Lark(g, postlex=NoopPostLex())),
+                ("use_bytes", lambda: _Lark(g, use_bytes=True)),
+                ("custom lexer", lambda: Lark(g, parser='lalr-rs', lexer=CustomLexerNew)),
+                ("parse_interactive", lambda: _Lark(g).parse_interactive("a")),
+                ("on_error", lambda: _Lark(g).parse("a", on_error=print)),
+                ("scan", lambda: _Lark(g).scan("a")),
+                ("l flag", lambda: _Lark(r"start: /a/l")),
+                ("re.ASCII", lambda: _Lark(g, g_regex_flags=re.ASCII)),
+            ]
+            for name, build in cases:
+                with self.subTest(name):
+                    self.assertRaises(ConfigurationError, build)
+
+        @unittest.skipIf(PARSER != 'lalr-rs', "lalr-rs translates terminals to PCRE2")
+        def test_lalr_rs_matches_python_re(self):
+            def outcome(parser, text):
+                try:
+                    tree = parser.parse(text)
+                except UnexpectedInput as e:
+                    return type(e), e.line, e.column
+                return [(t.type, str(t), t.start_pos, t.line, t.column, t.end_line, t.end_column, t.end_pos)
+                        for t in tree.scan_values(lambda v: isinstance(v, Token))]
+            cases = [
+                ("\\Z is the absolute end", r'!start: A NL?' + '\n' + r'A: /a;\Z/' + '\n' + r'NL: "\n"', "a;\n", {}),
+                ("\\u, \\U and \\N escapes", r'start: E+' + '\n' + r'E: /é|\U0001F600|\N{GREEK SMALL LETTER ALPHA}/', "é😀α", {}),
+                ("i flag", r'!start: "select"i NAME' + '\n' + r'NAME: /\w+/' + '\n' + r'%ignore " "', "SeLeCt Grüße", {}),
+                ("global re.I", r'start: W+' + '\n' + r'W: /[a-z]+/' + '\n' + r'%ignore " "', "ABC def", {'g_regex_flags': re.I}),
+                ("lookbehind", r'start: ESCAPED_STRING+' + '\n' + '%import common.ESCAPED_STRING\n%import common.WS\n%ignore WS', '"a\\"b" "c\\\\"\n"é"', {}),
+                ("positions after non-ASCII", r'start: W+' + '\n' + r'W: /\S+/' + '\n' + r'%ignore /\s+/', "é😀 名前\n  ü x", {}),
+                ("error after non-ASCII", r'start: W+' + '\n' + r'W: /[a-zé]+/' + '\n' + r'%ignore " "', "é é\n😀", {}),
+            ]
+            for name, grammar, text, options in cases:
+                with self.subTest(name):
+                    expected = outcome(Lark(grammar, parser='lalr', lexer=LEXER, **options), text)
+                    self.assertEqual(outcome(_Lark(grammar, **options), text), expected)
+
+        @unittest.skipIf(PARSER != 'lalr-rs', "lalr-rs runs the tree builder natively and builds only the Tokens it keeps")
+        def test_lalr_rs_tree_builder(self):
+            def dump(v):
+                if isinstance(v, Tree):
+                    m = v.meta
+                    meta = None if m.empty else (m.line, m.column, m.start_pos, m.end_line, m.end_column, m.end_pos)
+                    return type(v).__name__, v.data, meta, [dump(c) for c in v.children]
+                if isinstance(v, Token):
+                    return v.type, str(v), v.start_pos, v.line, v.column, v.end_line, v.end_column, v.end_pos
+                return v
+
+            def outcome(parser_name, grammar, text, make_options):
+                seen = []
+                parser = Lark(grammar, parser=parser_name, lexer=LEXER, **make_options(seen))
+                try:
+                    result = dump(parser.parse(text))
+                except UnexpectedInput as e:
+                    history = getattr(e, 'token_history', None) or []
+                    result = type(e), e.line, e.column, dump(getattr(e, 'token', None)), [dump(t) for t in history]
+                return result, seen
+
+            def comma_transformer(seen):
+                class T(Transformer):
+                    def COMMA(self, tok):
+                        seen.append(dump(tok))
+                        return tok
+                return {'transformer': T()}
+
+            def inline_transformer(seen):
+                @v_args(inline=True)
+                class T(Transformer):
+                    def item(self, *children):
+                        return 'item', [dump(c) for c in children]
+                return {'transformer': T()}
+
+            def inline_methods(seen):
+                @v_args(inline=True)
+                class T(Transformer):
+                    def pair(self, *children):
+                        return 'pair', [dump(c) for c in children]
+                    def seq(self, *children):
+                        return 'seq', [dump(c) for c in children]
+                    def opt(self, *children):
+                        return 'opt', [dump(c) for c in children]
+                    def outer(self, *children):
+                        return 'outer', [dump(c) for c in children]
+                    def _leaf(self, children):  # v_args skips _ names, so this gets the list
+                        return Tree('leaf', children)
+                return {'transformer': T()}
+
+            def inline_tree_positions(seen):
+                @v_args(inline=True)
+                class T(Transformer):
+                    def item(self, *children):
+                        return Tree('item', list(children))
+                return {'transformer': T(), 'propagate_positions': True}
+
+            def default_transformer(seen):
+                class T(Transformer):
+                    def __default__(self, data, children, meta):
+                        return Tree('default_' + data, children)
+                return {'transformer': T()}
+
+            class SubTree(Tree):
+                pass
+
+            def comma_lexer_callback(seen):
+                return {'lexer_callbacks': {'COMMA': lambda tok: seen.append(dump(tok)) or tok}}
+
+            items = '%import common.CNAME\n%ignore " "\n'
+            g = r'start: "(" item ("," item)* ")"' + '\nitem: CNAME | "[" CNAME? "]"\n' + items
+            cases = [
+                ("filtered punctuation", g, "(a, [b], [])", lambda seen: {}),
+                ("propagate_positions on a filtered edge", g, "(a, [b])", lambda seen: {'propagate_positions': True}),
+                ("propagate_positions callable", g, "(a, [b])", lambda seen: {'propagate_positions': lambda c: not isinstance(c, Token) or c != '('}),
+                ("keep_all_tokens", g, "(a, [b])", lambda seen: {'keep_all_tokens': True}),
+                ("!rule", g.replace('item:', '!item:'), "(a, [b])", lambda seen: {}),
+                ("maybe_placeholders", g.replace('CNAME?', '[CNAME]'), "([], [b])", lambda seen: {'maybe_placeholders': True}),
+                ("transformer on a filtered terminal", g, "(a, b, c)", comma_transformer),
+                ("lexer callback on a filtered terminal", g, "(a, b, c)", comma_lexer_callback),
+                ("Unless in a filtered position", r'start: ("if" CNAME)+' + '\n' + items, "if x if y", lambda seen: {}),
+                ("Unless in a kept position", r'start: (IF CNAME)+' + '\nIF: "if"\n' + items, "if x if y", lambda seen: {}),
+                ("left-recursive _rule", r'start: _items' + '\n_items: _items "," CNAME | CNAME\n' + items, "a, b, c", lambda seen: {}),
+                ("empty leading _rule", r'start: _e _e CNAME _e' + '\n_e: \n' + items, "a", lambda seen: {}),
+                ("_rule after a kept token", r'start: CNAME _rest' + '\n_rest: "," CNAME _rest |\n' + items, "a, b, c", lambda seen: {}),
+                ("_rule as the start symbol", r'_s: CNAME "," CNAME _t' + '\n_t: CNAME CNAME\n' + items, "a, b c d", lambda seen: {'start': '_s'}),
+                ("?rule", r'start: sum' + '\n?sum: sum "+" atom | atom\n?atom: CNAME | "(" sum ")"\n' + items, "a + (b) + c", lambda seen: {}),
+                ("?rule with an alias", r'start: x+' + '\n?x: CNAME "!" -> bang | CNAME\n' + items, "a b !", lambda seen: {}),
+                ("placeholders before a _rule", r'start: [CNAME] _x [CNAME]' + '\n_x: "x" CNAME\n' + items, "x a", lambda seen: {'maybe_placeholders': True}),
+                ("inline transformer", g, "(a, [b], [])", inline_transformer),
+                ("inline methods: several children, a left-recursive _rule, ?rule and a placeholder",
+                 r'start: pair seq opt opt pair' + '\npair: CNAME "=" [CNAME]\nseq: _items\n_items: _items "," CNAME | CNAME\n?opt: CNAME CNAME | "<" CNAME\n' + items,
+                 "k = v a, b, c x y < z j =", inline_methods),
+                ("inline method and _rule over a _rule Tree from a method",
+                 r'start: outer' + '\nouter: _mid CNAME\n_mid: _leaf CNAME\n_leaf: CNAME CNAME\n' + items, "a b c d", inline_methods),
+                ("inline method returning a Tree under propagate_positions", g, "(a, [b])", inline_tree_positions),
+                ("__default__ transformer", g, "(a, [b], [])", default_transformer),
+                ("tree_class subclass", g, "(a, [b], [])", lambda seen: {'tree_class': SubTree}),
+                ("UnexpectedToken after a filtered token", g, "(a,)", lambda seen: {}),
+                ("end of input after a filtered token", g, "(a, ", lambda seen: {}),
+                ("UnexpectedCharacters after a filtered token", g, "(a,%", lambda seen: {}),
+            ]
+            for name, grammar, text, make_options in cases:
+                with self.subTest(name):
+                    self.assertEqual(outcome('lalr-rs', grammar, text, make_options), outcome('lalr', grammar, text, make_options))
+
+        @unittest.skipIf(PARSER != 'lalr-rs', "only lalr-rs pauses the GC during a parse")
+        def test_lalr_rs_restores_gc(self):
+            import gc
+            seen = []
+            class Nested(Transformer):
+                def start(self, children):
+                    seen.append(gc.isenabled())
+                    if children[0] == 'b':
+                        inner.parse("a")
+                    seen.append(gc.isenabled())
+                    return children
+            inner = _Lark(r"""!start: "a" | "b" """)
+            outer = _Lark(r"""!start: "a" | "b" """, transformer=Nested())
+            for enabled in (True, False):
+                for text, error in (("a", None), ("b", None), ("c", UnexpectedCharacters)):
+                    with self.subTest(enabled=enabled, text=text):
+                        seen.clear()
+                        (gc.enable if enabled else gc.disable)()
+                        try:
+                            if error is None:
+                                outer.parse(text)
+                            else:
+                                self.assertRaises(error, outer.parse, text)
+                            self.assertEqual(gc.isenabled(), enabled)
+                            self.assertNotIn(True, seen)
+                        finally:
+                            gc.enable()
+
+        @unittest.skipIf(PARSER in LALR_PARSERS, "test on_error only works with lalr")
         def test_on_error_without_lalr(self):
             p = _Lark(r"""start: "A" """)
             self.assertRaises(NotImplementedError, p.parse, "", on_error=print)
@@ -2790,7 +2970,7 @@ def _make_parser_test(LEXER, PARSER):
             b = parser.parse(s)
             assert a == b
 
-        @unittest.skipIf(PARSER != 'lalr', "strict mode is only supported in lalr for now")
+        @unittest.skipIf(PARSER not in LALR_PARSERS, "strict mode is only supported in lalr for now")
         def test_strict(self):
             # Test regex collision
             grammar = r"""
@@ -2873,7 +3053,7 @@ def _make_parser_test(LEXER, PARSER):
                 self.assertEqual((m.range, m.value), ((0, 2), Tree('start', [])))
 
 
-    _NAME = "Test" + PARSER.capitalize() + LEXER.capitalize()
+    _NAME = "Test" + PARSER.replace("-", "_").capitalize() + LEXER.capitalize()
     _TestParser.__name__ = _NAME
     _TestParser.__qualname__ = "tests.test_parser." + _NAME
     globals()[_NAME] = _TestParser
@@ -2894,6 +3074,10 @@ _TO_TEST = [
         ('custom_old0', 'earley'),
         ('custom_old1', 'earley'),
 ]
+
+# lark_lalr_rs is built per version for CPython 3.11 and later only.
+if platform.python_implementation() == 'CPython' and sys.version_info >= (3, 11):
+    _TO_TEST += [('basic', 'lalr-rs'), ('contextual', 'lalr-rs')]
 
 for _LEXER, _PARSER in _TO_TEST:
     _make_parser_test(_LEXER, _PARSER)

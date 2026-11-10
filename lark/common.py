@@ -19,7 +19,9 @@ from .lexer import TerminalDef, Token
 
 ###{standalone
 
-_ParserArgType: 'TypeAlias' = 'Literal["earley", "lalr", "cyk", "auto"]'
+_ParserArgType: 'TypeAlias' = 'Literal["earley", "lalr", "lalr-rs", "cyk", "auto"]'
+# Parser types that build a LALR(1) table and drive it with an LR runtime.
+LALR_PARSERS = ('lalr', 'lalr-rs')
 _LexerArgType: 'TypeAlias' = 'Union[Literal["auto", "basic", "contextual", "dynamic", "dynamic_complete"], Type[Lexer]]'
 _LexerCallback = Callable[[Token], Token]
 ParserCallbacks = Dict[str, Callable]
